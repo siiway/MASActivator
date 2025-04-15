@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.RegularExpressions;
 
@@ -110,6 +111,117 @@ namespace MASActivator
         {
             setupWindowsEditionsComboBox();
         }
+
+        #region Change Windows Edition
+
+        [DllImport("DismApi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int DismInitialize(DismLogLevel logLevel, IntPtr logFilePath, IntPtr scratchDirectory);
+
+        [DllImport("DismApi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int DismOpenSession(string imagePath, IntPtr windowsDirectory, IntPtr systemDrive, out uint session);
+
+        [DllImport("DismApi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int DismSetEdition(uint session, string edition, string productKey, IntPtr cancelEvent, IntPtr progress, IntPtr userData);
+
+        [DllImport("DismApi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int DismShutdown();
+
+        private enum DismLogLevel
+        {
+            Errors = 0,
+            Warnings = 1,
+            Information = 2
+        }
+
+        /// <summary>
+        /// Change Windows edition using DISM API.
+        /// </summary>
+        /// <param name="targetEdition">Terget Edition</param>
+        /// <param name="productKey">Product Key</param>
+        private void ChangeWindowsEditionUsingDismApi(string targetEdition, string productKey)
+        {
+            uint session = 0;
+            bool hasError = false;
+
+            try
+            {
+                // 初始化 DISM API
+                int initResult = DismInitialize(DismLogLevel.Information, IntPtr.Zero, IntPtr.Zero);
+                if (initResult != 0)
+                {
+                    hasError = true;
+                    MessageBox.Show($"DismInitialize failed with error code: \n{initResult}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
+                // 打开 DISM 会话
+                int openSessionResult = DismOpenSession("DISM_{53BFAE52-B167-4E2F-A258-0A37B57FF845}", IntPtr.Zero, IntPtr.Zero, out session);
+                if (openSessionResult != 0)
+                {
+                    hasError = true;
+                    MessageBox.Show($"DismOpenSession failed with error code: \n{openSessionResult}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
+                // 设置版本
+                int setEditionResult = DismSetEdition(session, targetEdition, productKey, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                if (setEditionResult != 0)
+                {
+                    hasError = true;
+                    MessageBox.Show($"DismSetEdition failed with error code: \n{setEditionResult}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
+                if (hasError)
+                {
+                    MessageBox.Show("Failed to change Windows edition.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                else
+                {
+                    DialogResult dialogResult = MessageBox.Show("Windows edition changed successfully. Restart System?", "MASA", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+                    if (dialogResult == DialogResult.OK)
+                    {
+                        Process.Start("shutdown", "/r /t 0");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error: {ex.Message}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                // 关闭 DISM API
+                if (session != 0)
+                {
+                    DismShutdown();
+                }
+            }
+        }
+
+        private void btnChangeWindowsEdition_Click(object sender, EventArgs e)
+        {
+            // 获取选中的 Windows 版本
+            string selectedEdition = comboBoxWindowsEditions.SelectedItem.ToString();
+            if (selectedEdition != null && selectedEdition != "Select Windows Edition")
+            {
+                // 获取产品密钥
+                string productKey = getProductKey(selectedEdition);
+
+                if (!string.IsNullOrEmpty(productKey))
+                {
+                    // 调用 DISM API 更改版本
+                    ChangeWindowsEditionUsingDismApi(selectedEdition, productKey);
+                }
+                else
+                {
+                    MessageBox.Show("No valid product key found for the selected edition.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            else
+            {
+                MessageBox.Show("Please select a valid Windows edition.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
 
         List<string> targetEditions = GetTargetWindowsEditions();
 
@@ -232,6 +344,11 @@ namespace MASActivator
             return editions;
         }
 
+        /// <summary>
+        /// Change Windows edition using DISM command.
+        /// Now using DISM API instead of this; keep this in the code.
+        /// </summary>
+        /// <param name="edition">Target Edition</param>
         private void changeWindowsEdition(string edition)
         {
             if (edition == "Select Windows Edition")
@@ -264,6 +381,13 @@ namespace MASActivator
             }
         }
 
+        /// <summary>
+        /// Get the product key for the specified edition.
+        /// </summary>
+        /// <param name="edition">Windows Edition</param>
+        /// <returns>
+        /// The product key for the specified edition.
+        /// </returns>
         private string getProductKey(string edition)
         {
             // 定义产品密钥数据
@@ -330,19 +454,6 @@ namespace MASActivator
             return string.Empty;
         }
 
-        private void btnChangeWindowsEdition_Click(object sender, EventArgs e)
-        {
-            // 获取选中的 Windows 版本
-            string selectedEdition = comboBoxWindowsEditions.SelectedItem.ToString();
-            if (selectedEdition != null)
-            {
-                // 调用方法更改 Windows 版本
-                changeWindowsEdition(selectedEdition);
-            }
-            else
-            {
-                MessageBox.Show("Selected Windows Edition is NULL.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        }
+        #endregion
     }
 }
