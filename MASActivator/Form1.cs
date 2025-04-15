@@ -1,12 +1,19 @@
 using System;
 using System.Diagnostics;
 using System.Security.Principal;
+using System.ServiceProcess;
 using System.Text.RegularExpressions;
 
 namespace MASActivator
 {
     public partial class MainForm : Form
     {
+
+        #region Application Global ENVs
+        bool debug = false;
+        #endregion
+
+        #region Application Startup Init
         public MainForm()
         {
             InitializeComponent();
@@ -59,16 +66,20 @@ namespace MASActivator
             catch (Exception ex)
             {
                 // 处理异常，例如用户拒绝提升权限
-                MessageBox.Show("无法以管理员身份运行应用程序：" + ex.Message, "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Unable to restart as Admin: \n" + ex.Message, "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
 
             Environment.Exit(0); // 退出当前实例
         }
 
+        #endregion
+
+        #region Mainform Design
         private void MainForm_Load(object sender, EventArgs e)
         {
             setupOtherPage();
         }
+
 
         private void OpenWebPage(string url)
         {
@@ -82,7 +93,6 @@ namespace MASActivator
             }
         }
 
-        #region Mainform Design
 
         private void linkLabel1_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
@@ -106,10 +116,15 @@ namespace MASActivator
 
         #endregion
 
+        #region Pages Setup
         private void setupOtherPage()
         {
             setupWindowsEditionsComboBox();
         }
+
+        #endregion
+
+        #region Get Windows Target Editions
 
         List<string> targetEditions = GetTargetWindowsEditions();
 
@@ -232,6 +247,69 @@ namespace MASActivator
             return editions;
         }
 
+        #endregion
+
+        #region Change Windows Editions
+        private bool ConfirmEditionChange(string targetEdition)
+        {
+            DialogResult result = MessageBox.Show(
+                $"Changing the current edition to [{targetEdition}].\n\nImportant: Save your work before continuing. The system will auto-restart.",
+                "MASA - Change Edition",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning);
+
+            return result == DialogResult.OK;
+        }
+
+
+        private void PrepareForEditionChange()
+        {
+            try
+            {
+                // 停止 TrustedInstaller 服务
+                ServiceController service = new ServiceController("TrustedInstaller");
+                if (service.Status == ServiceControllerStatus.Running)
+                {
+                    service.Stop();
+                    service.WaitForStatus(ServiceControllerStatus.Stopped);
+                }
+
+                // 备份并清理日志
+                string cbsLogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "logs", "cbs", "cbs.log");
+                string dismLogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "logs", "DISM", "dism.log");
+
+                string backupFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ChangeEdition_Logs");
+                Directory.CreateDirectory(backupFolder);
+
+                File.Copy(cbsLogPath, Path.Combine(backupFolder, $"cbs_backup_{DateTime.Now:yyyyMMdd_HHmmss}.log"), true);
+                File.Copy(dismLogPath, Path.Combine(backupFolder, $"dism_backup_{DateTime.Now:yyyyMMdd_HHmmss}.log"), true);
+
+                File.Delete(cbsLogPath);
+                File.Delete(dismLogPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error during preparation: {ex.Message}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                throw;
+            }
+        }
+        private void RestoreTrustedInstallerService()
+        {
+            try
+            {
+                // 启动 TrustedInstaller 服务
+                ServiceController service = new ServiceController("TrustedInstaller");
+                if (service.Status == ServiceControllerStatus.Stopped)
+                {
+                    service.Start();
+                    service.WaitForStatus(ServiceControllerStatus.Running);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error restoring TrustedInstaller service: {ex.Message}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
         private void changeWindowsEdition(string edition)
         {
             if (edition == "Select Windows Edition")
@@ -239,28 +317,18 @@ namespace MASActivator
                 MessageBox.Show("Please select a valid Windows edition.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            // 获取产品密钥
-            string productKey = getProductKey(edition);
-            ProcessStartInfo psi = new ProcessStartInfo
+            else if (debug)
             {
-                FileName = "cmd.exe",
-                Arguments = $"/c dism /online /Set-Edition:{edition} /ProductKey:{productKey} /AcceptEula",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            using (Process process = Process.Start(psi))
+                // 如果是企业版或服务器版本，使用 CBS XML 方法
+                PrepareForEditionChange();
+                changeWindowsEditionUsingCBS(edition);
+                RestoreTrustedInstallerService();
+                return;
+            }
+            else
             {
-                if (process != null)
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit();
-                    MessageBox.Show(output, "MASA", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                else
-                {
-                    MessageBox.Show("Error: Process is null.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+                // DISM
+                changeWindowsEditionUsingDISM(edition, getProductKey(edition));
             }
         }
 
@@ -344,5 +412,144 @@ namespace MASActivator
                 MessageBox.Show("Selected Windows Edition is NULL.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
+        private void changeWindowsEditionUsingDISM(string targetEdition, string productKey)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c dism /online /Set-Edition:{targetEdition} /ProductKey:{productKey} /AcceptEula",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(psi))
+                {
+                    if (process != null)
+                    {
+                        string output = process.StandardOutput.ReadToEnd();
+                        string error = process.StandardError.ReadToEnd();
+                        process.WaitForExit();
+
+                        if (process.ExitCode == 0)
+                        {
+                            MessageBox.Show("Windows edition changed successfully. The system will now restart.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            Process.Start("shutdown", "/r /t 0");
+                        }
+                        else
+                        {
+                            MessageBox.Show($"DISM command failed with error: {error}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Failed to start DISM process.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error: {ex.Message}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        private void changeWindowsEditionUsingCBS(string targetEdition)
+        {
+            try
+            {
+                // 提示用户保存工作并确认继续
+                DialogResult result = MessageBox.Show(
+                    $"Changing the current edition to [{targetEdition}].\n\nImportant: Save your work before continuing. The system will auto-restart.",
+                    "MASA - Change Edition",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Warning);
+
+                if (result != DialogResult.OK)
+                {
+                    MessageBox.Show("Operation cancelled by the user.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                // 创建临时 CBS XML 文件
+                string tempCbsScriptPath = CreateTemporaryCbsXml(targetEdition);
+
+                if (string.IsNullOrEmpty(tempCbsScriptPath))
+                {
+                    MessageBox.Show("Failed to create CBS XML file.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // 执行 CBS 脚本
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "DISM.exe",
+                    Arguments = $"/online /Apply-CustomDataFile:{tempCbsScriptPath}",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(psi))
+                {
+                    if (process != null)
+                    {
+                        string output = process.StandardOutput.ReadToEnd();
+                        string error = process.StandardError.ReadToEnd();
+                        int exitCode = process.ExitCode;
+                        process.WaitForExit();
+
+                        if (process.ExitCode == 0)
+                        {
+                            MessageBox.Show("Windows edition changed successfully. The system will now restart.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            Process.Start("shutdown", "/r /t 0");
+                        }
+                        else
+                        {
+                            MessageBox.Show($"CBS script execution failed with exit code: {exitCode}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Failed to start CBS script process.", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error: {ex.Message}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private string CreateTemporaryCbsXml(string targetEdition)
+        {
+            try
+            {
+                // 定义 CBS XML 内容
+                string cbsXmlContent = $@"<?xml version=""1.0"" encoding=""utf-8""?>
+        <Deployment xmlns=""http://schemas.microsoft.com/embedded/2004/10/ImageUpdate"" Name=""SetEdition"" Description=""Set Windows Edition"">
+          <Run>
+            <SetEdition Name=""{targetEdition}"" />
+          </Run>
+        </Deployment>";
+
+                // 创建临时文件路径
+                string tempCbsScriptPath = Path.Combine(Path.GetTempPath(), "SetEdition.cbs.xml");
+
+                // 写入文件
+                File.WriteAllText(tempCbsScriptPath, cbsXmlContent);
+
+                return tempCbsScriptPath;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error creating CBS XML file: {ex.Message}", "MASA", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return null;
+            }
+        }
+
+        #endregion
     }
 }
